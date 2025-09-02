@@ -10,6 +10,7 @@ jest.mock('openid-client', () => ({
 }));
 
 import type { OidcConfigDto } from '@n8n/api-types';
+import { testDb } from '@n8n/backend-test-utils';
 import { type User, UserRepository } from '@n8n/db';
 import { Container } from '@n8n/di';
 import type * as mocked_oidc_client from 'openid-client';
@@ -20,8 +21,7 @@ import { ForbiddenError } from '@/errors/response-errors/forbidden.error';
 import { OIDC_CLIENT_SECRET_REDACTED_VALUE } from '@/sso.ee/oidc/constants';
 import { OidcService } from '@/sso.ee/oidc/oidc.service.ee';
 import { createUser } from '@test-integration/db/users';
-
-import * as testDb from '../shared/test-db';
+import { UserError } from 'n8n-workflow';
 
 beforeAll(async () => {
 	await testDb.init();
@@ -114,7 +114,7 @@ describe('OIDC service', () => {
 				loginEnabled: true,
 			};
 
-			await expect(oidcService.updateConfig(newConfig)).rejects.toThrowError(BadRequestError);
+			await expect(oidcService.updateConfig(newConfig)).rejects.toThrowError(UserError);
 		});
 
 		it('should keep current secret if redact value is given in update', async () => {
@@ -137,6 +137,86 @@ describe('OIDC service', () => {
 			);
 			expect(loadedConfig.loginEnabled).toBe(true);
 		});
+
+		it('should throw UserError when OIDC discovery fails during updateConfig', async () => {
+			const newConfig: OidcConfigDto = {
+				clientId: 'test-client-id',
+				clientSecret: 'test-client-secret',
+				discoveryEndpoint: 'https://example.com/.well-known/openid-configuration',
+				loginEnabled: true,
+			};
+
+			discoveryMock.mockRejectedValueOnce(new Error('Discovery failed'));
+
+			await expect(oidcService.updateConfig(newConfig)).rejects.toThrowError(UserError);
+			expect(discoveryMock).toHaveBeenCalledWith(
+				expect.any(URL),
+				'test-client-id',
+				'test-client-secret',
+			);
+		});
+
+		it('should invalidate cached configuration when updateConfig is called', async () => {
+			// First, set up a working configuration
+			const initialConfig: OidcConfigDto = {
+				clientId: 'initial-client-id',
+				clientSecret: 'initial-client-secret',
+				discoveryEndpoint: 'https://example.com/.well-known/openid-configuration',
+				loginEnabled: true,
+			};
+
+			const mockConfiguration = new real_odic_client.Configuration(
+				{
+					issuer: 'https://example.com/auth/realms/n8n',
+					client_id: 'initial-client-id',
+					redirect_uris: ['http://n8n.io/sso/oidc/callback'],
+					response_types: ['code'],
+					scopes: ['openid', 'profile', 'email'],
+					authorization_endpoint: 'https://example.com/auth',
+				},
+				'initial-client-id',
+			);
+
+			discoveryMock.mockReset();
+			discoveryMock.mockClear();
+			discoveryMock.mockResolvedValue(mockConfiguration);
+			await oidcService.updateConfig(initialConfig);
+
+			// Generate a login URL to populate the cache
+			await oidcService.generateLoginUrl();
+			expect(discoveryMock).toHaveBeenCalledTimes(2); // Once in updateConfig, once in generateLoginUrl
+
+			// Update config with new values
+			const newConfig: OidcConfigDto = {
+				clientId: 'new-client-id',
+				clientSecret: 'new-client-secret',
+				discoveryEndpoint: 'https://newprovider.example.com/.well-known/openid-configuration',
+				loginEnabled: true,
+			};
+
+			const newMockConfiguration = new real_odic_client.Configuration(
+				{
+					issuer: 'https://newprovider.example.com/auth/realms/n8n',
+					client_id: 'new-client-id',
+					redirect_uris: ['http://n8n.io/sso/oidc/callback'],
+					response_types: ['code'],
+					scopes: ['openid', 'profile', 'email'],
+					authorization_endpoint: 'https://newprovider.example.com/auth',
+				},
+				'new-client-id',
+			);
+
+			discoveryMock.mockResolvedValue(newMockConfiguration);
+			await oidcService.updateConfig(newConfig);
+
+			// Generate login URL again - should use new configuration
+			const authUrl = await oidcService.generateLoginUrl();
+			expect(authUrl.pathname).toEqual('/auth');
+			expect(authUrl.searchParams.get('client_id')).toEqual('new-client-id');
+
+			// Verify discovery was called again due to cache invalidation
+			expect(discoveryMock).toHaveBeenCalledTimes(4); // Initial config, initial login, new config, new login
+		});
 	});
 	it('should generate a valid callback URL', () => {
 		const callbackUrl = oidcService.getCallbackUrl();
@@ -156,6 +236,15 @@ describe('OIDC service', () => {
 			'test-client-id',
 		);
 		discoveryMock.mockResolvedValue(mockConfiguration);
+
+		const initialConfig: OidcConfigDto = {
+			clientId: 'test-client-id',
+			clientSecret: 'test-client-secret',
+			discoveryEndpoint: 'https://example.com/.well-known/openid-configuration',
+			loginEnabled: true,
+		};
+
+		await oidcService.updateConfig(initialConfig);
 
 		const authUrl = await oidcService.generateLoginUrl();
 
@@ -249,7 +338,7 @@ describe('OIDC service', () => {
 			expect(user.id).toEqual(createdUser.id);
 		});
 
-		it('should throw `BadRequestError` if user already exists out of OIDC system', async () => {
+		it('should sign up the user if user already exists out of OIDC system', async () => {
 			const callbackUrl = new URL(
 				'http://localhost:5678/rest/sso/oidc/callback?code=valid-code&state=valid-state',
 			);
@@ -280,10 +369,12 @@ describe('OIDC service', () => {
 				email: 'user1@example.com',
 			});
 
-			await expect(oidcService.loginUser(callbackUrl)).rejects.toThrowError(BadRequestError);
+			const user = await oidcService.loginUser(callbackUrl);
+			expect(user).toBeDefined();
+			expect(user.email).toEqual('user1@example.com');
 		});
 
-		it('should throw `BadRequestError` if OIDC Idp does not have email verified', async () => {
+		it('should sign in user if OIDC Idp does not have email verified', async () => {
 			const callbackUrl = new URL(
 				'http://localhost:5678/rest/sso/oidc/callback?code=valid-code&state=valid-state',
 			);
@@ -314,7 +405,9 @@ describe('OIDC service', () => {
 				email: 'user3@example.com',
 			});
 
-			await expect(oidcService.loginUser(callbackUrl)).rejects.toThrowError(BadRequestError);
+			const user = await oidcService.loginUser(callbackUrl);
+			expect(user).toBeDefined();
+			expect(user.email).toEqual('user3@example.com');
 		});
 
 		it('should throw `BadRequestError` if OIDC Idp does not provide an email', async () => {
@@ -345,6 +438,79 @@ describe('OIDC service', () => {
 			// Simulate that the user already exists in the database
 			fetchUserInfoMock.mockResolvedValueOnce({
 				email_verified: true,
+			});
+
+			await expect(oidcService.loginUser(callbackUrl)).rejects.toThrowError(BadRequestError);
+		});
+
+		it('should throw `BadRequestError` if OIDC Idp provides an invalid email format', async () => {
+			const callbackUrl = new URL(
+				'http://localhost:5678/rest/sso/oidc/callback?code=valid-code&state=valid-state',
+			);
+
+			const mockTokens: mocked_oidc_client.TokenEndpointResponse &
+				mocked_oidc_client.TokenEndpointResponseHelpers = {
+				access_token: 'mock-access-token-invalid',
+				id_token: 'mock-id-token-invalid',
+				token_type: 'bearer',
+				claims: () => {
+					return {
+						sub: 'mock-subject-invalid',
+						iss: 'https://example.com/auth/realms/n8n',
+						aud: 'test-client-id',
+						iat: Math.floor(Date.now() / 1000) - 1000,
+						exp: Math.floor(Date.now() / 1000) + 3600,
+					} as mocked_oidc_client.IDToken;
+				},
+				expiresIn: () => 3600,
+			} as mocked_oidc_client.TokenEndpointResponse &
+				mocked_oidc_client.TokenEndpointResponseHelpers;
+
+			authorizationCodeGrantMock.mockResolvedValueOnce(mockTokens);
+
+			// Provide an invalid email format
+			fetchUserInfoMock.mockResolvedValueOnce({
+				email_verified: true,
+				email: 'invalid-email-format',
+			});
+
+			const error = await oidcService.loginUser(callbackUrl).catch((e) => e);
+			expect(error.message).toBe('Invalid email format');
+		});
+
+		it.each([
+			['not-an-email'],
+			['@missinglocal.com'],
+			['missing@.com'],
+			['spaces in@email.com'],
+			['double@@domain.com'],
+		])('should throw `BadRequestError` for invalid email <%s>', async (invalidEmail) => {
+			const callbackUrl = new URL(
+				'http://localhost:5678/rest/sso/oidc/callback?code=valid-code&state=valid-state',
+			);
+
+			const mockTokens: mocked_oidc_client.TokenEndpointResponse &
+				mocked_oidc_client.TokenEndpointResponseHelpers = {
+				access_token: 'mock-access-token-multi',
+				id_token: 'mock-id-token-multi',
+				token_type: 'bearer',
+				claims: () => {
+					return {
+						sub: 'mock-subject-multi',
+						iss: 'https://example.com/auth/realms/n8n',
+						aud: 'test-client-id',
+						iat: Math.floor(Date.now() / 1000) - 1000,
+						exp: Math.floor(Date.now() / 1000) + 3600,
+					} as mocked_oidc_client.IDToken;
+				},
+				expiresIn: () => 3600,
+			} as mocked_oidc_client.TokenEndpointResponse &
+				mocked_oidc_client.TokenEndpointResponseHelpers;
+
+			authorizationCodeGrantMock.mockResolvedValueOnce(mockTokens);
+			fetchUserInfoMock.mockResolvedValueOnce({
+				email_verified: true,
+				email: invalidEmail,
 			});
 
 			await expect(oidcService.loginUser(callbackUrl)).rejects.toThrowError(BadRequestError);

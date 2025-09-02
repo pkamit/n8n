@@ -1,10 +1,15 @@
-import type { User } from '@n8n/db';
-import type { ExecutionEntity } from '@n8n/db';
+import {
+	createTeamProject,
+	createManyWorkflows,
+	createWorkflow,
+	shareWorkflowWithUsers,
+	testDb,
+	mockInstance,
+} from '@n8n/backend-test-utils';
+import type { User, ExecutionEntity } from '@n8n/db';
 
 import type { ActiveWorkflowManager } from '@/active-workflow-manager';
 import { Telemetry } from '@/telemetry';
-import { mockInstance } from '@test/mocking';
-import { createTeamProject } from '@test-integration/db/projects';
 
 import {
 	createErrorExecution,
@@ -14,12 +19,6 @@ import {
 	createWaitingExecution,
 } from '../shared/db/executions';
 import { createMemberWithApiKey, createOwnerWithApiKey } from '../shared/db/users';
-import {
-	createManyWorkflows,
-	createWorkflow,
-	shareWorkflowWithUsers,
-} from '../shared/db/workflows';
-import * as testDb from '../shared/test-db';
 import type { SuperAgentTest } from '../shared/types';
 import * as utils from '../shared/utils/';
 
@@ -264,6 +263,7 @@ describe('GET /executions', () => {
 			stoppedAt,
 			workflowId,
 			waitTill,
+			status,
 		} = response.body.data[0];
 
 		expect(id).toBeDefined();
@@ -275,6 +275,7 @@ describe('GET /executions', () => {
 		expect(stoppedAt).not.toBeNull();
 		expect(workflowId).toBe(successfulExecution.workflowId);
 		expect(waitTill).toBeNull();
+		expect(status).toBe(successfulExecution.status);
 	});
 
 	test('should paginate two executions', async () => {
@@ -318,6 +319,7 @@ describe('GET /executions', () => {
 				stoppedAt,
 				workflowId,
 				waitTill,
+				status,
 			} = executions[i];
 
 			expect(id).toBeDefined();
@@ -329,6 +331,7 @@ describe('GET /executions', () => {
 			expect(stoppedAt).not.toBeNull();
 			expect(workflowId).toBe(successfulExecutions[i].workflowId);
 			expect(waitTill).toBeNull();
+			expect(status).toBe(successfulExecutions[i].status);
 		}
 	});
 
@@ -357,6 +360,7 @@ describe('GET /executions', () => {
 			stoppedAt,
 			workflowId,
 			waitTill,
+			status,
 		} = response.body.data[0];
 
 		expect(id).toBeDefined();
@@ -368,6 +372,7 @@ describe('GET /executions', () => {
 		expect(stoppedAt).not.toBeNull();
 		expect(workflowId).toBe(errorExecution.workflowId);
 		expect(waitTill).toBeNull();
+		expect(status).toBe(errorExecution.status);
 	});
 
 	test('should return all waiting executions', async () => {
@@ -397,6 +402,7 @@ describe('GET /executions', () => {
 			stoppedAt,
 			workflowId,
 			waitTill,
+			status,
 		} = response.body.data[0];
 
 		expect(id).toBeDefined();
@@ -408,6 +414,7 @@ describe('GET /executions', () => {
 		expect(stoppedAt).not.toBeNull();
 		expect(workflowId).toBe(waitingExecution.workflowId);
 		expect(new Date(waitTill).getTime()).toBeGreaterThan(Date.now() - 1000);
+		expect(status).toBe(waitingExecution.status);
 	});
 
 	test('should retrieve all executions of specific workflow', async () => {
@@ -435,6 +442,7 @@ describe('GET /executions', () => {
 				stoppedAt,
 				workflowId,
 				waitTill,
+				status,
 			} = execution;
 
 			expect(savedExecutions.some((exec) => exec.id === id)).toBe(true);
@@ -446,6 +454,7 @@ describe('GET /executions', () => {
 			expect(stoppedAt).not.toBeNull();
 			expect(workflowId).toBe(workflow.id);
 			expect(waitTill).toBeNull();
+			expect(status).toBe(execution.status);
 		}
 	});
 

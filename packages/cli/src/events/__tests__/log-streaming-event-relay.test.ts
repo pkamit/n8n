@@ -1,5 +1,6 @@
-import type { IWorkflowDb } from '@n8n/db';
+import { GLOBAL_OWNER_ROLE, type IWorkflowDb } from '@n8n/db';
 import { mock } from 'jest-mock-extended';
+import type { InstanceSettings } from 'n8n-core';
 import type { INode, IRun, IWorkflowBase } from 'n8n-workflow';
 
 import type { MessageEventBus } from '@/eventbus/message-event-bus/message-event-bus';
@@ -10,7 +11,9 @@ import { LogStreamingEventRelay } from '@/events/relays/log-streaming.event-rela
 describe('LogStreamingEventRelay', () => {
 	const eventBus = mock<MessageEventBus>();
 	const eventService = new EventService();
-	new LogStreamingEventRelay(eventService, eventBus).init();
+	const hostId = 'host-xyz';
+	const instanceSettings = mock<InstanceSettings>({ hostId });
+	new LogStreamingEventRelay(eventService, eventBus, instanceSettings).init();
 
 	afterEach(() => {
 		jest.clearAllMocks();
@@ -24,7 +27,7 @@ describe('LogStreamingEventRelay', () => {
 					email: 'john@n8n.io',
 					firstName: 'John',
 					lastName: 'Doe',
-					role: 'owner',
+					role: { slug: 'owner' },
 				},
 				workflow: mock<IWorkflowBase>({
 					id: 'wf123',
@@ -58,7 +61,7 @@ describe('LogStreamingEventRelay', () => {
 					email: 'jane@n8n.io',
 					firstName: 'Jane',
 					lastName: 'Smith',
-					role: 'user',
+					role: { slug: 'user' },
 				},
 				workflowId: 'wf789',
 				publicApi: false,
@@ -86,7 +89,7 @@ describe('LogStreamingEventRelay', () => {
 					email: 'jane@n8n.io',
 					firstName: 'Jane',
 					lastName: 'Smith',
-					role: 'user',
+					role: { slug: 'user' },
 				},
 				workflowId: 'wf789',
 				publicApi: false,
@@ -114,7 +117,7 @@ describe('LogStreamingEventRelay', () => {
 					email: 'jane@n8n.io',
 					firstName: 'Jane',
 					lastName: 'Smith',
-					role: 'user',
+					role: { slug: 'user' },
 				},
 				workflowId: 'wf789',
 				publicApi: false,
@@ -142,7 +145,7 @@ describe('LogStreamingEventRelay', () => {
 					email: 'alex@n8n.io',
 					firstName: 'Alex',
 					lastName: 'Johnson',
-					role: 'editor',
+					role: { slug: 'editor' },
 				},
 				workflow: mock<IWorkflowDb>({ id: 'wf101', name: 'Updated Workflow' }),
 				publicApi: false,
@@ -223,6 +226,35 @@ describe('LogStreamingEventRelay', () => {
 			});
 		});
 
+		it('should log job completion on `workflow-post-execute` for successful job', () => {
+			const runData = mock<IRun>({
+				finished: true,
+				status: 'success',
+				mode: 'manual',
+				jobId: '12345',
+				data: { resultData: {} },
+			});
+
+			const event = {
+				executionId: 'exec-123',
+				userId: 'user-456',
+				workflow: mock<IWorkflowBase>({ id: 'wf-789', name: 'Test Workflow' }),
+				runData,
+			};
+
+			eventService.emit('workflow-post-execute', event);
+
+			expect(eventBus.sendQueueEvent).toHaveBeenCalledWith({
+				eventName: 'n8n.queue.job.completed',
+				payload: {
+					executionId: 'exec-123',
+					workflowId: 'wf-789',
+					hostId: 'host-xyz',
+					jobId: '12345',
+				},
+			});
+		});
+
 		it('should log on `workflow-post-execute` event for failed execution', () => {
 			const runData = mock<IRun>({
 				status: 'error',
@@ -266,6 +298,45 @@ describe('LogStreamingEventRelay', () => {
 				},
 			});
 		});
+
+		it('should log job failure on `workflow-post-execute` for failed job', () => {
+			const runData = mock<IRun>({
+				finished: false,
+				status: 'error',
+				mode: 'manual',
+				jobId: '67890',
+				data: {
+					resultData: {
+						lastNodeExecuted: 'some-node',
+						// @ts-expect-error Partial mock
+						error: {
+							node: mock<INode>({ type: 'some-type' }),
+							message: 'some-message',
+						},
+						errorMessage: 'some-message',
+					},
+				},
+			}) as unknown as IRun;
+
+			const event = {
+				executionId: 'exec-456',
+				userId: 'user-789',
+				workflow: mock<IWorkflowBase>({ id: 'wf-101', name: 'Failed Workflow' }),
+				runData,
+			};
+
+			eventService.emit('workflow-post-execute', event);
+
+			expect(eventBus.sendQueueEvent).toHaveBeenCalledWith({
+				eventName: 'n8n.queue.job.failed',
+				payload: {
+					executionId: 'exec-456',
+					workflowId: 'wf-101',
+					hostId: 'host-xyz',
+					jobId: '67890',
+				},
+			});
+		});
 	});
 
 	describe('user events', () => {
@@ -276,7 +347,7 @@ describe('LogStreamingEventRelay', () => {
 					email: 'updated@example.com',
 					firstName: 'Updated',
 					lastName: 'User',
-					role: 'global:member',
+					role: { slug: 'global:member' },
 				},
 				fieldsChanged: ['firstName', 'lastName', 'password'],
 			};
@@ -303,7 +374,7 @@ describe('LogStreamingEventRelay', () => {
 					email: 'john@n8n.io',
 					firstName: 'John',
 					lastName: 'Doe',
-					role: 'some-role',
+					role: { slug: 'some-role' },
 				},
 				targetUserOldStatus: 'active',
 				publicApi: false,
@@ -333,7 +404,7 @@ describe('LogStreamingEventRelay', () => {
 					email: 'inviter@example.com',
 					firstName: 'Inviter',
 					lastName: 'User',
-					role: 'global:owner',
+					role: { slug: GLOBAL_OWNER_ROLE.slug },
 				},
 				targetUserId: ['newUser123'],
 				publicApi: false,
@@ -363,7 +434,7 @@ describe('LogStreamingEventRelay', () => {
 					email: 'reinviter@example.com',
 					firstName: 'Reinviter',
 					lastName: 'User',
-					role: 'global:admin',
+					role: { slug: 'global:admin' },
 				},
 				targetUserId: ['existingUser456'],
 			};
@@ -390,7 +461,7 @@ describe('LogStreamingEventRelay', () => {
 					email: 'newuser@example.com',
 					firstName: 'New',
 					lastName: 'User',
-					role: 'global:member',
+					role: { slug: 'global:member' },
 				},
 				userType: 'email',
 				wasDisabledLdapUser: false,
@@ -417,7 +488,7 @@ describe('LogStreamingEventRelay', () => {
 					email: 'loggedin@example.com',
 					firstName: 'Logged',
 					lastName: 'In',
-					role: 'global:owner',
+					role: { slug: GLOBAL_OWNER_ROLE.slug },
 				},
 				authenticationMethod: 'email',
 			};
@@ -446,7 +517,7 @@ describe('LogStreamingEventRelay', () => {
 					email: 'user101@example.com',
 					firstName: 'John',
 					lastName: 'Doe',
-					role: 'global:member',
+					role: { slug: 'global:member' },
 				},
 			};
 
@@ -471,14 +542,14 @@ describe('LogStreamingEventRelay', () => {
 					email: 'john@n8n.io',
 					firstName: 'John',
 					lastName: 'Doe',
-					role: 'some-role',
+					role: { slug: 'some-role' },
 				},
 				invitee: {
 					id: '456',
 					email: 'jane@n8n.io',
 					firstName: 'Jane',
 					lastName: 'Doe',
-					role: 'some-other-role',
+					role: { slug: 'some-other-role' },
 				},
 			};
 
@@ -512,7 +583,7 @@ describe('LogStreamingEventRelay', () => {
 					email: 'resetuser@example.com',
 					firstName: 'Reset',
 					lastName: 'User',
-					role: 'global:member',
+					role: { slug: 'global:member' },
 				},
 			};
 
@@ -637,7 +708,7 @@ describe('LogStreamingEventRelay', () => {
 					email: 'sharer@example.com',
 					firstName: 'Alice',
 					lastName: 'Sharer',
-					role: 'global:owner',
+					role: { slug: GLOBAL_OWNER_ROLE.slug },
 				},
 				credentialId: 'cred789',
 				credentialType: 'githubApi',
@@ -672,7 +743,7 @@ describe('LogStreamingEventRelay', () => {
 					email: 'user@example.com',
 					firstName: 'Test',
 					lastName: 'User',
-					role: 'global:owner',
+					role: { slug: GLOBAL_OWNER_ROLE.slug },
 				},
 				credentialType: 'githubApi',
 				credentialId: 'cred456',
@@ -707,7 +778,7 @@ describe('LogStreamingEventRelay', () => {
 					email: 'creduser@example.com',
 					firstName: 'Cred',
 					lastName: 'User',
-					role: 'global:owner',
+					role: { slug: GLOBAL_OWNER_ROLE.slug },
 				},
 				credentialId: 'cred789',
 				credentialType: 'githubApi',
@@ -736,7 +807,7 @@ describe('LogStreamingEventRelay', () => {
 					email: 'updatecred@example.com',
 					firstName: 'Update',
 					lastName: 'Cred',
-					role: 'global:owner',
+					role: { slug: GLOBAL_OWNER_ROLE.slug },
 				},
 				credentialId: 'cred101',
 				credentialType: 'slackApi',
@@ -788,7 +859,7 @@ describe('LogStreamingEventRelay', () => {
 					email: 'packageupdater@example.com',
 					firstName: 'Package',
 					lastName: 'Updater',
-					role: 'global:admin',
+					role: { slug: 'global:admin' },
 				},
 				packageName: 'n8n-nodes-awesome-package',
 				packageVersionCurrent: '1.0.0',
@@ -825,7 +896,7 @@ describe('LogStreamingEventRelay', () => {
 					email: 'admin@example.com',
 					firstName: 'Admin',
 					lastName: 'User',
-					role: 'global:admin',
+					role: { slug: 'global:admin' },
 				},
 				inputString: 'n8n-nodes-custom-package',
 				packageName: 'n8n-nodes-custom-package',
@@ -864,7 +935,7 @@ describe('LogStreamingEventRelay', () => {
 					email: 'packagedeleter@example.com',
 					firstName: 'Package',
 					lastName: 'Deleter',
-					role: 'global:admin',
+					role: { slug: 'global:admin' },
 				},
 				packageName: 'n8n-nodes-awesome-package',
 				packageVersion: '1.0.0',
@@ -901,7 +972,7 @@ describe('LogStreamingEventRelay', () => {
 					email: 'recipient@example.com',
 					firstName: 'Failed',
 					lastName: 'Recipient',
-					role: 'global:member',
+					role: { slug: 'global:member' },
 				},
 				messageType: 'New user invite',
 				publicApi: false,
@@ -931,7 +1002,7 @@ describe('LogStreamingEventRelay', () => {
 					email: 'apiuser@example.com',
 					firstName: 'API',
 					lastName: 'User',
-					role: 'global:owner',
+					role: { slug: GLOBAL_OWNER_ROLE.slug },
 				},
 				publicApi: true,
 			};
@@ -957,7 +1028,7 @@ describe('LogStreamingEventRelay', () => {
 					email: 'apiuser@example.com',
 					firstName: 'API',
 					lastName: 'User',
-					role: 'global:owner',
+					role: { slug: GLOBAL_OWNER_ROLE.slug },
 				},
 				publicApi: true,
 			};
@@ -1304,6 +1375,71 @@ describe('LogStreamingEventRelay', () => {
 					nodeId: 'n-2',
 					executionId: 'e-3',
 					workflowId: 'w-4',
+				},
+			});
+		});
+	});
+
+	describe('job events', () => {
+		it('should log on `job-enqueued` event', () => {
+			const event: RelayEventMap['job-enqueued'] = {
+				executionId: 'exec-1',
+				workflowId: 'wf-2',
+				hostId,
+				jobId: 'job-4',
+			};
+
+			eventService.emit('job-enqueued', event);
+
+			expect(eventBus.sendQueueEvent).toHaveBeenCalledWith({
+				eventName: 'n8n.queue.job.enqueued',
+				payload: {
+					executionId: 'exec-1',
+					workflowId: 'wf-2',
+					hostId,
+					jobId: 'job-4',
+				},
+			});
+		});
+
+		it('should log on `job-dequeued` event', () => {
+			const event: RelayEventMap['job-dequeued'] = {
+				executionId: 'exec-1',
+				workflowId: 'wf-2',
+				hostId,
+				jobId: 'job-4',
+			};
+
+			eventService.emit('job-dequeued', event);
+
+			expect(eventBus.sendQueueEvent).toHaveBeenCalledWith({
+				eventName: 'n8n.queue.job.dequeued',
+				payload: {
+					executionId: 'exec-1',
+					workflowId: 'wf-2',
+					hostId,
+					jobId: 'job-4',
+				},
+			});
+		});
+
+		it('should log on `job-stalled` event', () => {
+			const event: RelayEventMap['job-stalled'] = {
+				executionId: 'exec-1',
+				workflowId: 'wf-2',
+				hostId,
+				jobId: 'job-4',
+			};
+
+			eventService.emit('job-stalled', event);
+
+			expect(eventBus.sendQueueEvent).toHaveBeenCalledWith({
+				eventName: 'n8n.queue.job.stalled',
+				payload: {
+					executionId: 'exec-1',
+					workflowId: 'wf-2',
+					hostId,
+					jobId: 'job-4',
 				},
 			});
 		});

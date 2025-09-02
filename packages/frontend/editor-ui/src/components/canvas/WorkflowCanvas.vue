@@ -35,7 +35,7 @@ const props = withDefaults(
 
 const $style = useCssModule();
 
-const { onNodesInitialized } = useVueFlow({ id: props.id });
+const { onNodesInitialized } = useVueFlow(props.id);
 
 const workflow = toRef(props, 'workflow');
 const workflowObject = toRef(props, 'workflowObject');
@@ -67,7 +67,7 @@ const mappedConnectionsThrottled = throttledRef(mappedConnections, 200);
 
 <template>
 	<div :class="$style.wrapper" data-test-id="canvas-wrapper">
-		<div :class="$style.canvas">
+		<div id="canvas" :class="$style.canvas">
 			<Canvas
 				v-if="workflow"
 				:id="id"
@@ -75,6 +75,7 @@ const mappedConnectionsThrottled = throttledRef(mappedConnections, 200);
 				:connections="executing ? mappedConnectionsThrottled : mappedConnections"
 				:event-bus="eventBus"
 				:read-only="readOnly"
+				:executing="executing"
 				v-bind="$attrs"
 			/>
 		</div>
@@ -84,7 +85,7 @@ const mappedConnectionsThrottled = throttledRef(mappedConnections, 200);
 
 <style lang="scss" module>
 .wrapper {
-	display: block;
+	display: flex;
 	position: relative;
 	width: 100%;
 	height: 100%;
@@ -96,5 +97,7 @@ const mappedConnectionsThrottled = throttledRef(mappedConnections, 200);
 	height: 100%;
 	position: relative;
 	display: block;
+	align-items: stretch;
+	justify-content: stretch;
 }
 </style>

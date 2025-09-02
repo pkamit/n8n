@@ -1,13 +1,14 @@
 import { OidcConfigDto } from '@n8n/api-types';
+import { AuthenticatedRequest } from '@n8n/db';
 import { Body, Get, GlobalScope, Licensed, Post, RestController } from '@n8n/decorators';
 import { Request, Response } from 'express';
 
 import { AuthService } from '@/auth/auth.service';
-import { AuthenticatedRequest } from '@/requests';
 import { UrlService } from '@/services/url.service';
 
 import { OIDC_CLIENT_SECRET_REDACTED_VALUE } from '../constants';
 import { OidcService } from '../oidc.service.ee';
+import { AuthlessRequest } from '@/requests';
 
 @RestController('/sso/oidc')
 export class OidcController {
@@ -42,6 +43,7 @@ export class OidcController {
 	}
 
 	@Get('/login', { skipAuth: true })
+	@Licensed('feat:oidc')
 	async redirectToAuthProvider(_req: Request, res: Response) {
 		const authorizationURL = await this.oidcService.generateLoginUrl();
 
@@ -49,13 +51,14 @@ export class OidcController {
 	}
 
 	@Get('/callback', { skipAuth: true })
-	async callbackHandler(req: Request, res: Response) {
+	@Licensed('feat:oidc')
+	async callbackHandler(req: AuthlessRequest, res: Response) {
 		const fullUrl = `${this.urlService.getInstanceBaseUrl()}${req.originalUrl}`;
 		const callbackUrl = new URL(fullUrl);
 
 		const user = await this.oidcService.loginUser(callbackUrl);
 
-		this.authService.issueCookie(res, user);
+		this.authService.issueCookie(res, user, true, req.browserId);
 
 		res.redirect('/');
 	}

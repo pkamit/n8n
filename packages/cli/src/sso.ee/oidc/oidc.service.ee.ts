@@ -4,26 +4,23 @@ import { GlobalConfig } from '@n8n/config';
 import {
 	AuthIdentity,
 	AuthIdentityRepository,
+	isValidEmail,
+	GLOBAL_MEMBER_ROLE,
 	SettingsRepository,
 	type User,
 	UserRepository,
 } from '@n8n/db';
-import { Service } from '@n8n/di';
+import { Container, Service } from '@n8n/di';
 import { Cipher } from 'n8n-core';
-import { jsonParse } from 'n8n-workflow';
+import { jsonParse, UserError } from 'n8n-workflow';
 import * as client from 'openid-client';
 
-import config from '@/config';
 import { BadRequestError } from '@/errors/response-errors/bad-request.error';
 import { ForbiddenError } from '@/errors/response-errors/forbidden.error';
 import { InternalServerError } from '@/errors/response-errors/internal-server.error';
 import { UrlService } from '@/services/url.service';
 
-import {
-	OIDC_CLIENT_SECRET_REDACTED_VALUE,
-	OIDC_LOGIN_ENABLED,
-	OIDC_PREFERENCES_DB_KEY,
-} from './constants';
+import { OIDC_CLIENT_SECRET_REDACTED_VALUE, OIDC_PREFERENCES_DB_KEY } from './constants';
 import {
 	getCurrentAuthenticationMethod,
 	isEmailCurrentAuthenticationMethod,
@@ -63,7 +60,7 @@ export class OidcService {
 
 	async init() {
 		this.oidcConfig = await this.loadConfig(true);
-		console.log(`OIDC login is ${this.oidcConfig.loginEnabled ? 'enabled' : 'disabled'}.`);
+		this.logger.debug(`OIDC login is ${this.oidcConfig.loginEnabled ? 'enabled' : 'disabled'}.`);
 		await this.setOidcLoginEnabled(this.oidcConfig.loginEnabled);
 	}
 
@@ -109,23 +106,42 @@ export class OidcService {
 			throw new BadRequestError('An email is required');
 		}
 
-		if (!userInfo.email_verified) {
-			throw new BadRequestError('Email needs to be verified');
+		if (!isValidEmail(userInfo.email)) {
+			throw new BadRequestError('Invalid email format');
 		}
 
 		const openidUser = await this.authIdentityRepository.findOne({
 			where: { providerId: claims.sub, providerType: 'oidc' },
-			relations: ['user'],
+			relations: {
+				user: {
+					role: true,
+				},
+			},
 		});
 
 		if (openidUser) {
 			return openidUser.user;
 		}
 
-		const foundUser = await this.userRepository.findOneBy({ email: userInfo.email });
+		const foundUser = await this.userRepository.findOne({
+			where: { email: userInfo.email },
+			relations: ['authIdentities', 'role'],
+		});
 
 		if (foundUser) {
-			throw new BadRequestError('User already exist with that email.');
+			this.logger.debug(
+				`OIDC login: User with email ${userInfo.email} already exists, linking OIDC identity.`,
+			);
+			// If the user already exists, we just add the OIDC identity to the user
+			const id = this.authIdentityRepository.create({
+				providerId: claims.sub,
+				providerType: 'oidc',
+				userId: foundUser.id,
+			});
+
+			await this.authIdentityRepository.save(id);
+
+			return foundUser;
 		}
 
 		return await this.userRepository.manager.transaction(async (trx) => {
@@ -135,7 +151,7 @@ export class OidcService {
 					lastName: userInfo.family_name,
 					email: userInfo.email,
 					authIdentities: [],
-					role: 'global:member',
+					role: GLOBAL_MEMBER_ROLE,
 					password: 'no password set',
 				},
 				trx,
@@ -161,6 +177,9 @@ export class OidcService {
 		if (currentConfig) {
 			try {
 				const oidcConfig = jsonParse<OidcConfigDto>(currentConfig.value);
+
+				if (oidcConfig.discoveryEndpoint === '') return DEFAULT_OIDC_RUNTIME_CONFIG;
+
 				const discoveryUrl = new URL(oidcConfig.discoveryEndpoint);
 
 				if (oidcConfig.clientSecret && decryptSecret) {
@@ -173,7 +192,7 @@ export class OidcService {
 			} catch (error) {
 				this.logger.warn(
 					'Failed to load OIDC configuration from database, falling back to default configuration.',
-					// eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+
 					{ error },
 				);
 			}
@@ -193,10 +212,23 @@ export class OidcService {
 			// Validating that discoveryEndpoint is a valid URL
 			discoveryEndpoint = new URL(newConfig.discoveryEndpoint);
 		} catch (error) {
-			throw new BadRequestError('Provided discovery endpoint is not a valid URL');
+			this.logger.error(`The provided endpoint is not a valid URL: ${newConfig.discoveryEndpoint}`);
+			throw new UserError('Provided discovery endpoint is not a valid URL');
 		}
 		if (newConfig.clientSecret === OIDC_CLIENT_SECRET_REDACTED_VALUE) {
 			newConfig.clientSecret = this.oidcConfig.clientSecret;
+		}
+		try {
+			const discoveredMetadata = await client.discovery(
+				discoveryEndpoint,
+				newConfig.clientId,
+				newConfig.clientSecret,
+			);
+			// TODO: validate Metadata against features
+			this.logger.debug(`Discovered OIDC metadata: ${JSON.stringify(discoveredMetadata)}`);
+		} catch (error) {
+			this.logger.error('Failed to discover OIDC metadata', { error });
+			throw new UserError('Failed to discover OIDC metadata, based on the provided configuration');
 		}
 		await this.settingsRepository.update(
 			{
@@ -219,6 +251,10 @@ export class OidcService {
 			...newConfig,
 			discoveryEndpoint,
 		};
+		this.cachedOidcConfiguration = undefined; // reset cached configuration
+		this.logger.debug(
+			`OIDC login is now ${this.oidcConfig.loginEnabled ? 'enabled' : 'disabled'}.`,
+		);
 
 		await this.setOidcLoginEnabled(this.oidcConfig.loginEnabled);
 	}
@@ -235,24 +271,29 @@ export class OidcService {
 		const targetAuthenticationMethod =
 			!enabled && currentAuthenticationMethod === 'oidc' ? 'email' : currentAuthenticationMethod;
 
-		config.set(OIDC_LOGIN_ENABLED, enabled);
+		Container.get(GlobalConfig).sso.oidc.loginEnabled = enabled;
 		await setCurrentAuthenticationMethod(enabled ? 'oidc' : targetAuthenticationMethod);
 	}
 
 	private cachedOidcConfiguration:
-		| {
+		| ({
 				configuration: Promise<client.Configuration>;
 				validTill: Date;
-		  }
+		  } & OidcRuntimeConfig)
 		| undefined;
 
 	private async getOidcConfiguration(): Promise<client.Configuration> {
 		const now = Date.now();
 		if (
 			this.cachedOidcConfiguration === undefined ||
-			now >= this.cachedOidcConfiguration.validTill.getTime()
+			now >= this.cachedOidcConfiguration.validTill.getTime() ||
+			this.oidcConfig.discoveryEndpoint.toString() !==
+				this.cachedOidcConfiguration.discoveryEndpoint.toString() ||
+			this.oidcConfig.clientId !== this.cachedOidcConfiguration.clientId ||
+			this.oidcConfig.clientSecret !== this.cachedOidcConfiguration.clientSecret
 		) {
 			this.cachedOidcConfiguration = {
+				...this.oidcConfig,
 				configuration: client.discovery(
 					this.oidcConfig.discoveryEndpoint,
 					this.oidcConfig.clientId,

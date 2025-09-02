@@ -10,9 +10,6 @@
         "classType": {
             "type": "string"
         },
-        "endTime": {
-            "type": "string"
-        },
         "flrID": {
             "type": "string"
         },
@@ -46,5 +43,5 @@
             "type": "integer"
         }
     },
-    "version": 3
+    "version": 5
 }

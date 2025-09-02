@@ -45,6 +45,9 @@
         "$layout_id": {
             "type": "object",
             "properties": {
+                "display_label": {
+                    "type": "string"
+                },
                 "id": {
                     "type": "string"
                 },
@@ -81,6 +84,9 @@
         },
         "Created_Time": {
             "type": "string"
+        },
+        "Email_Opt_Out": {
+            "type": "boolean"
         },
         "Full_Name": {
             "type": "string"
@@ -121,7 +127,13 @@
                     }
                 }
             }
+        },
+        "Unsubscribed_Mode": {
+            "type": "null"
+        },
+        "Unsubscribed_Time": {
+            "type": "null"
         }
     },
-    "version": 3
+    "version": 5
 }
